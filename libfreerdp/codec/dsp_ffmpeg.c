@@ -271,11 +271,13 @@ static BOOL ffmpeg_open_context(FREERDP_DSP_CONTEXT* context)
 
 	context->context->max_b_frames = 1;
 	context->context->delay = 0;
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
-	context->context->channels = format->nChannels;
-	context->context->channel_layout = layout;
-#else
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
 	av_channel_layout_default(&context->context->ch_layout, format->nChannels);
+#else
+	context->context->channels = format->nChannels;
+	const int64_t layout = av_get_default_channel_layout(format->nChannels);
+	context->context->channel_layout = layout;
 #endif
 	context->context->sample_rate = format->nSamplesPerSec;
 	context->context->block_align = format->nBlockAlign;
@@ -319,11 +321,11 @@ static BOOL ffmpeg_open_context(FREERDP_DSP_CONTEXT* context)
 	if (!context->rcontext)
 		goto fail;
 
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+	av_channel_layout_default(&context->frame->ch_layout, format->nChannels);
+#else
 	context->frame->channel_layout = layout;
 	context->frame->channels = format->nChannels;
-#else
-	av_channel_layout_default(&context->frame->ch_layout, format->nChannels);
 #endif
 	context->frame->sample_rate = format->nSamplesPerSec;
 	context->frame->format = AV_SAMPLE_FMT_S16;
@@ -339,20 +341,22 @@ static BOOL ffmpeg_open_context(FREERDP_DSP_CONTEXT* context)
 		context->resampled->sample_rate = format->nSamplesPerSec;
 	}
 
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+	av_channel_layout_default(&context->resampled->ch_layout, format->nChannels);
+#else
 	context->resampled->channel_layout = layout;
 	context->resampled->channels = format->nChannels;
-#else
-	av_channel_layout_default(&context->resampled->ch_layout, format->nChannels);
 #endif
 
 	if (context->context->frame_size > 0)
 	{
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+		ret = av_channel_layout_copy(&context->buffered->ch_layout, &context->resampled->ch_layout);
+		if (ret != 0)
+			goto fail;
+#else
 		context->buffered->channel_layout = context->resampled->channel_layout;
 		context->buffered->channels = context->resampled->channels;
-#else
-		av_channel_layout_copy(&context->buffered->ch_layout, &context->resampled->ch_layout);
 #endif
 		context->buffered->format = context->resampled->format;
 		context->buffered->nb_samples = context->context->frame_size;
@@ -500,11 +504,12 @@ static BOOL ffmpeg_fill_frame(AVFrame* frame, const AUDIO_FORMAT* inputFormat, c
                               size_t size)
 {
 	int ret, bpp;
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+	av_channel_layout_default(&frame->ch_layout, inputFormat->nChannels);
+#else
 	frame->channels = inputFormat->nChannels;
 	frame->channel_layout = av_get_default_channel_layout(frame->channels);
-#else
-	av_channel_layout_default(&frame->ch_layout, inputFormat->nChannels);
 #endif
 	frame->sample_rate = inputFormat->nSamplesPerSec;
 	frame->format = ffmpeg_sample_format(inputFormat);
@@ -595,13 +600,14 @@ static BOOL ffmpeg_decode(AVCodecContext* dec_ctx, AVPacket* pkt, AVFrame* frame
 		}
 
 		{
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
-			const size_t channels = resampled->channels;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+			const size_t nrchannels = resampled->ch_layout.nb_channels;
 #else
-			const size_t channels = resampled->ch_layout.nb_channels;
+			const size_t nrchannels = resampled->channels;
 #endif
-			const size_t data_size = channels * resampled->nb_samples * 2;
-			Stream_EnsureRemainingCapacity(out, data_size);
+			const size_t data_size = nrchannels * resampled->nb_samples * 2;
+			if (!Stream_EnsureRemainingCapacity(out, data_size))
+				return FALSE;
 			Stream_Write(out, resampled->data[0], data_size);
 		}
 	}
@@ -695,14 +701,15 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT*
 			if (inSamples + (int)context->bufferedSamples > context->context->frame_size)
 				inSamples = context->context->frame_size - (int)context->bufferedSamples;
 
-#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(57, 28, 100)
-			const int channels = context->context->channels;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+			const size_t nrchannels = context->context->ch_layout.nb_channels;
 #else
-			const int channels = context->context->ch_layout.nb_channels;
+			const size_t nrchannels = context->context->channels;
 #endif
+
 			rc = av_samples_copy(context->buffered->extended_data,
 			                     context->resampled->extended_data, (int)context->bufferedSamples,
-			                     copied, inSamples, channels, context->context->sample_fmt);
+			                     copied, inSamples, nrchannels, context->context->sample_fmt);
 			rest -= inSamples;
 			copied += inSamples;
 			context->bufferedSamples += (UINT32)inSamples;
